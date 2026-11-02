@@ -1,0 +1,12 @@
+{
+  "jarvis-voice": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python C:/Users/Admin/.gemini/config/scripts/jarvis_speech.py",
+        "timeout": 600
+      }
+    ]
+  }
+}

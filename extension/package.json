@@ -1,0 +1,38 @@
+{
+  "name": "jarvis-voice-controls",
+  "displayName": "J.A.R.V.I.S. Voice Controls",
+  "description": "Status bar controls for J.A.R.V.I.S. voice synthesis (Mute/Unmute, Stop, Speed, Replay)",
+  "version": "1.0.0",
+  "publisher": "antigravity-user",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "jarvis.toggleMute",
+        "title": "J.A.R.V.I.S.: Toggle Mute / Unmute"
+      },
+      {
+        "command": "jarvis.stopAudio",
+        "title": "J.A.R.V.I.S.: Stop Speech Now"
+      },
+      {
+        "command": "jarvis.changeSpeed",
+        "title": "J.A.R.V.I.S.: Change Playback Speed"
+      },
+      {
+        "command": "jarvis.replayAudio",
+        "title": "J.A.R.V.I.S.: Replay Last Message"
+      }
+    ]
+  }
+}
+
