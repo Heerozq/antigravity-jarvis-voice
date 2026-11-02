@@ -66,7 +66,11 @@ function ensureHeadlessBackend(statusBarItem) {
                 cwd: PROJECT_DIR,
                 detached: true,
                 stdio: 'ignore',
-                windowsHide: true
+                windowsHide: true,
+                env: Object.assign({}, process.env, {
+                    OMNIVOICE_DATA_DIR: 'D:\\VoiceStudio\\data',
+                    OMNIVOICE_CACHE_DIR: 'D:\\VoiceStudio\\models'
+                })
             }
         );
         child.unref();

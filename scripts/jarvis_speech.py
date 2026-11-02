@@ -20,6 +20,8 @@ TRANSCRIPT_TRACK_FILE = os.path.join(TEMP_DIR, "antigravity_jarvis_last_transcri
 
 PYTHON_BACKEND_PATH = r"D:\VoiceStudio\project\.venv\Scripts\python.exe"
 PROJECT_DIR = r"D:\VoiceStudio\project"
+VOICESTUDIO_DATA_DIR = r"D:\VoiceStudio\data"
+VOICESTUDIO_MODELS_DIR = r"D:\VoiceStudio\models"
 FFMPEG_PATH = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPLAY_PATH = r"C:\ffmpeg\bin\ffplay.exe"
 
@@ -41,60 +43,44 @@ def log(msg):
     except Exception:
         pass
 
-def ensure_licenses_accepted():
-    """Ensure OmniVoice and Higgs-Audio tokenizer licenses are recorded as accepted."""
-    try:
-        script = """
-import sys
-sys.path.insert(0, r"D:\\VoiceStudio\\project\\backend")
-from services import model_acceptance
-licenses = [
-    ('k2-fsa/OmniVoice', 'v2:d938ea928581624d5732507057d8530320f638ac61426165cbd5abe67be5c9bc'),
-    ('eustlb/higgs-audio-v2-tokenizer', 'v2:6b442e435fd392f7726e7c44a30da71bba23adecaabe4c8da725cb30579ecff1')
-]
-for repo, fp in licenses:
-    try:
-        model_acceptance.accept(repo, fp)
-    except Exception:
-        pass
-"""
-        subprocess.run(
-            [PYTHON_BACKEND_PATH, "-c", script],
-            cwd=PROJECT_DIR,
-            capture_output=True,
-            timeout=10,
-            check=False
-        )
-        log("Verified model licenses accepted")
-    except Exception as e:
-        log(f"License acceptance check error: {e}")
-
 def ensure_backend_running():
+    """Verify VoiceStudio backend is alive and has the Atul Kapoor voice profile loaded."""
+    has_profile = False
     try:
-        with urllib.request.urlopen("http://127.0.0.1:3900/health", timeout=1):
+        with urllib.request.urlopen("http://127.0.0.1:3900/profiles", timeout=1) as resp:
+            profiles = json.loads(resp.read().decode("utf-8"))
+            for p in profiles:
+                if p.get("name") == "Atul Kapoor" or p.get("id") == "f3734950":
+                    has_profile = True
+                    break
+        if has_profile:
             return True
+        log("Backend running but lacks Atul Kapoor profile (wrong data dir). Restarting...")
+        # Terminate port 3900 listeners
+        subprocess.run(["powershell", "-NoProfile", "-Command", "Get-NetTCPConnection -LocalPort 3900 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"], capture_output=True)
+        time.sleep(1)
     except Exception:
         pass
 
     if os.path.exists(PYTHON_BACKEND_PATH):
-        log("Auto-starting headless VoiceStudio Python backend...")
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-        subprocess.Popen(
-            [
-                PYTHON_BACKEND_PATH, "-m", "uvicorn", "main:app",
-                "--app-dir", "backend", "--host", "127.0.0.1", "--port", "3900"
-            ],
-            cwd=PROJECT_DIR,
-            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-            close_fds=True
+        log("Starting headless VoiceStudio Python backend with OMNIVOICE_DATA_DIR...")
+        ps_cmd = (
+            f'$cmd = "cmd /c set OMNIVOICE_DATA_DIR={VOICESTUDIO_DATA_DIR}&& set OMNIVOICE_CACHE_DIR={VOICESTUDIO_MODELS_DIR}&& '
+            f'{PYTHON_BACKEND_PATH} -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 3900"; '
+            f'[wmiclass]"win32_process".Create($cmd, "{PROJECT_DIR}", $null)'
         )
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, check=False)
+        except Exception as e:
+            log(f"WMI process spawn failed: {e}")
+
         for _ in range(16):
             time.sleep(0.5)
             try:
-                with urllib.request.urlopen("http://127.0.0.1:3900/health", timeout=1):
-                    log("Headless backend is now ready!")
-                    ensure_licenses_accepted()
+                with urllib.request.urlopen("http://127.0.0.1:3900/profiles", timeout=1) as resp:
+                    profiles = json.loads(resp.read().decode("utf-8"))
+                    names = [p.get("name") for p in profiles]
+                    log(f"Headless backend ready! Active profiles: {names}")
                     return True
             except Exception:
                 pass
@@ -226,10 +212,10 @@ def play_audio(speed):
     return False
 
 def synthesize_speech(cleaned_speech, voice, speed):
-    """Call VoiceStudio backend to generate raw audio, then play."""
+    """Call VoiceStudio backend to generate raw audio with Atul Kapoor voice profile."""
     ensure_backend_running()
 
-    log(f"Synthesizing {len(cleaned_speech)} chars: {cleaned_speech[:60]}...")
+    log(f"Synthesizing {len(cleaned_speech)} chars with voice '{voice}'...")
     api_url = "http://127.0.0.1:3900/v1/audio/speech"
     chunks = split_text_into_chunks(cleaned_speech)
     combined_audio = b""
@@ -243,32 +229,23 @@ def synthesize_speech(cleaned_speech, voice, speed):
             "speed": 1.0  # Preserve native baritone timbre; speed adjusted via atempo
         }
 
-        retried = False
-        while True:
-            try:
-                req = urllib.request.Request(
-                    api_url,
-                    headers={"Content-Type": "application/json"},
-                    data=json.dumps(data).encode("utf-8")
-                )
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    chunk_audio = resp.read()
-                    combined_audio += chunk_audio
-                    log(f"Chunk {i+1} received: {len(chunk_audio)} bytes")
-                    break
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode("utf-8", errors="replace")
-                log(f"HTTP Error {e.code}: {err_body}")
-                if e.code == 403 and "model_licence_required" in err_body and not retried:
-                    log("Auto-accepting model licenses and retrying...")
-                    ensure_licenses_accepted()
-                    retried = True
-                    time.sleep(1)
-                    continue
-                return False
-            except Exception as e:
-                log(f"TTS synthesis network error: {e}")
-                return False
+        try:
+            req = urllib.request.Request(
+                api_url,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(data).encode("utf-8")
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                chunk_audio = resp.read()
+                combined_audio += chunk_audio
+                log(f"Chunk {i+1} received: {len(chunk_audio)} bytes")
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            log(f"HTTP Error {e.code}: {err_body}")
+            return False
+        except Exception as e:
+            log(f"TTS synthesis error: {e}")
+            return False
 
     if combined_audio:
         with open(RAW_AUDIO_PATH, "wb") as f:
@@ -288,9 +265,8 @@ def replay_last():
     cleaned_speech = clean_text_for_speech(latest_response)
 
     if cleaned_speech and len(cleaned_speech) >= 3:
-        raw_hash = hashlib.sha256(cleaned_speech.encode("utf-8")).hexdigest()
+        raw_hash = hashlib.sha256((cleaned_speech + "_" + voice).encode("utf-8")).hexdigest()
         
-        # Check if RAW_AUDIO_PATH already contains the audio for this latest response
         last_recorded_hash = ""
         if os.path.exists(CACHE_FILE):
             try:
@@ -304,9 +280,8 @@ def replay_last():
             play_audio(speed)
             return
 
-        log("Replay: RAW_AUDIO_PATH is stale or missing. Re-synthesizing latest response...")
+        log("Replay: RAW_AUDIO_PATH is stale or missing. Re-synthesizing with Atul Kapoor voice...")
         if synthesize_speech(cleaned_speech, voice, speed):
-            # Record hash
             try:
                 with open(CACHE_FILE, "w") as f:
                     f.write(f"{raw_hash}_{speed}_{voice}")
@@ -315,7 +290,7 @@ def replay_last():
             play_audio(speed)
             return
 
-    # Fallback to playing whatever audio exists
+    # Fallback to playing existing audio buffer
     if os.path.exists(RAW_AUDIO_PATH) or os.path.exists(READY_AUDIO_PATH):
         log("Replay fallback: playing existing audio buffer")
         play_audio(speed)
@@ -366,8 +341,8 @@ def main():
         print("{}")
         return
 
-    # Check deduplication
-    raw_hash = hashlib.sha256(cleaned_speech.encode("utf-8")).hexdigest()
+    # Deduplication check
+    raw_hash = hashlib.sha256((cleaned_speech + "_" + voice).encode("utf-8")).hexdigest()
     full_hash = f"{raw_hash}_{speed}_{voice}"
 
     if os.path.exists(CACHE_FILE):
@@ -384,7 +359,6 @@ def main():
 
     # Synthesize speech
     if synthesize_speech(cleaned_speech, voice, speed):
-        # Save cache hash ONLY after successful synthesis
         try:
             with open(CACHE_FILE, "w") as f:
                 f.write(full_hash)
