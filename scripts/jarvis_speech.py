@@ -56,7 +56,6 @@ def ensure_backend_running():
         if has_profile:
             return True
         log("Backend running but lacks Atul Kapoor profile (wrong data dir). Restarting...")
-        # Terminate port 3900 listeners
         subprocess.run(["powershell", "-NoProfile", "-Command", "Get-NetTCPConnection -LocalPort 3900 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"], capture_output=True)
         time.sleep(1)
     except Exception:
@@ -90,6 +89,9 @@ def clean_text_for_speech(text):
     if not text:
         return ""
     
+    # Remove metadata & tags
+    text = re.sub(r'<ADDITIONAL_METADATA>[\s\S]*?</ADDITIONAL_METADATA>', '', text)
+    text = re.sub(r'</?USER_REQUEST>', '', text)
     # Remove code blocks
     text = re.sub(r'```[\s\S]*?```', '', text)
     # Remove HTML tags
@@ -160,6 +162,50 @@ def find_latest_transcript():
         matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
         return matches[0]
     return None
+
+def get_conversation_turns(transcript_path):
+    """Parse transcript and return ordered conversational turns with previews."""
+    if not transcript_path or not os.path.exists(transcript_path):
+        return []
+    turns = []
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    entry_type = entry.get("type")
+                    content = entry.get("content")
+                    if not content:
+                        continue
+                    if entry_type == "USER_INPUT":
+                        clean = re.sub(r'<ADDITIONAL_METADATA>[\s\S]*?</ADDITIONAL_METADATA>', '', content)
+                        clean = re.sub(r'</?USER_REQUEST>', '', clean).strip()
+                        clean = re.sub(r'\s+', ' ', clean)
+                        if clean:
+                            summary = clean[:100] + ("..." if len(clean) > 100 else "")
+                            turns.append({
+                                "id": len(turns) + 1,
+                                "role": "You",
+                                "summary": summary,
+                                "content": clean
+                            })
+                    elif entry_type == "PLANNER_RESPONSE":
+                        clean = clean_text_for_speech(content)
+                        if clean and len(clean) >= 3:
+                            summary = clean[:100] + ("..." if len(clean) > 100 else "")
+                            turns.append({
+                                "id": len(turns) + 1,
+                                "role": "JARVIS",
+                                "summary": summary,
+                                "content": content
+                            })
+                except Exception:
+                    pass
+    except Exception as e:
+        log(f"Error parsing conversation turns: {e}")
+    return turns
 
 def extract_latest_response(transcript_path):
     """Extract the latest assistant PLANNER_RESPONSE from the transcript."""
@@ -297,12 +343,95 @@ def replay_last():
     else:
         log("Replay: No audio available to play")
 
+def read_specific_turn(turn_id):
+    """Synthesize and read aloud a specific turn by its ID from the transcript."""
+    settings = load_settings()
+    speed = float(settings.get("speed", 1.2))
+    voice = settings.get("voice", "Atul Kapoor")
+    log(f"Read turn requested: turn_id={turn_id}")
+
+    transcript_path = find_latest_transcript()
+    turns = get_conversation_turns(transcript_path)
+    target = next((t for t in turns if t["id"] == turn_id), None)
+    if not target:
+        log(f"Turn #{turn_id} not found in transcript")
+        return False
+
+    cleaned_speech = clean_text_for_speech(target["content"])
+    if not cleaned_speech or len(cleaned_speech) < 3:
+        log("Cleaned turn text too short or empty")
+        return False
+
+    log(f"Speaking turn #{turn_id} ({target['role']}): {cleaned_speech[:60]}...")
+    if synthesize_speech(cleaned_speech, voice, speed):
+        play_audio(speed)
+        return True
+    return False
+
+def speak_file_content(file_path):
+    """Read arbitrary text from a file, clean it, synthesize, and speak."""
+    if not os.path.exists(file_path):
+        log(f"Speak file not found: {file_path}")
+        return False
+
+    settings = load_settings()
+    speed = float(settings.get("speed", 1.2))
+    voice = settings.get("voice", "Atul Kapoor")
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+    except Exception as e:
+        log(f"Error reading speak file: {e}")
+        return False
+
+    cleaned_speech = clean_text_for_speech(raw_text)
+    if not cleaned_speech or len(cleaned_speech) < 2:
+        log("Selected text is empty after cleaning")
+        return False
+
+    log(f"Speaking selected file text ({len(cleaned_speech)} chars)...")
+    if synthesize_speech(cleaned_speech, voice, speed):
+        play_audio(speed)
+        return True
+    return False
+
 def main():
+    # 1. Output conversation history as JSON
+    if "--get-history" in sys.argv:
+        transcript_path = find_latest_transcript()
+        turns = get_conversation_turns(transcript_path)
+        data = [{"id": t["id"], "role": t["role"], "summary": t["summary"]} for t in turns]
+        sys.stdout.buffer.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+        return
+
+    # 2. Read specific turn
+    if "--read-turn" in sys.argv:
+        try:
+            turn_idx = int(sys.argv[sys.argv.index("--read-turn") + 1])
+            read_specific_turn(turn_idx)
+        except Exception as e:
+            log(f"Invalid --read-turn argument: {e}")
+        print("{}")
+        return
+
+    # 3. Speak file content (for highlighted selection)
+    if "--speak-file" in sys.argv:
+        try:
+            file_path = sys.argv[sys.argv.index("--speak-file") + 1]
+            speak_file_content(file_path)
+        except Exception as e:
+            log(f"Invalid --speak-file argument: {e}")
+        print("{}")
+        return
+
+    # 4. Replay last response
     if "--replay" in sys.argv:
         replay_last()
         print("{}")
         return
 
+    # 5. Normal Antigravity hook invocation
     settings = load_settings()
     if not settings.get("enabled", True):
         log("J.A.R.V.I.S. speech is muted in settings")

@@ -1,8 +1,8 @@
 {
   "name": "jarvis-voice-controls",
   "displayName": "J.A.R.V.I.S. Voice Controls",
-  "description": "Status bar controls for J.A.R.V.I.S. voice synthesis (Mute/Unmute, Stop, Speed, Replay)",
-  "version": "1.0.0",
+  "description": "Status bar & context menu controls for J.A.R.V.I.S. voice synthesis (Mute/Unmute, Stop, Speed, Replay, History, Speak Selection)",
+  "version": "1.1.0",
   "publisher": "antigravity-user",
   "engines": {
     "vscode": "^1.80.0"
@@ -31,8 +31,37 @@
       {
         "command": "jarvis.replayAudio",
         "title": "J.A.R.V.I.S.: Replay Last Message"
+      },
+      {
+        "command": "jarvis.showHistory",
+        "title": "J.A.R.V.I.S.: Browse & Read Conversation History"
+      },
+      {
+        "command": "jarvis.speakSelection",
+        "title": "J.A.R.V.I.S.: Speak Selected Text"
       }
-    ]
+    ],
+    "keybindings": [
+      {
+        "command": "jarvis.speakSelection",
+        "key": "alt+s",
+        "mac": "alt+s",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "jarvis.showHistory",
+        "key": "alt+h",
+        "mac": "alt+h"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "jarvis.speakSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@100"
+        }
+      ]
+    }
   }
 }
-

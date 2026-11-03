@@ -12,11 +12,13 @@ Replaces cloud subscription services (**Wispr Flow** and **ElevenLabs**) with lo
 - **RTX 4070 GPU Acceleration:** Near-instant neural voice generation via PyTorch & CUDA.
 - **Atul Kapoor Voice Timbre:** Authentic deep baritone voice speaking fluent English.
 - **Smart Markdown Cleaner:** Automatically filters out raw code snippets, tables, backticks, and markdown hashes so speech remains conversational.
-- **Antigravity Status Bar Controls:**
+- **Antigravity Status Bar & Shortcut Controls:**
   - `$(unmute) JARVIS: ON / OFF` (Mute toggle)
   - `$(debug-stop) Stop` (Instant stop switch)
-  - `$(dashboard) 1.35x` (Interactive speed dropdown from 1.0x to 2.0x)
+  - `$(dashboard) 1.2x` (Interactive speed dropdown from 1.0x to 2.0x)
   - `$(history) Replay` (Re-reads last response with current speed)
+  - `$(list-unordered) History` (Browse & speak any past conversation turn, shortcut: `Alt + H`)
+- **Speak Highlighted Selection (`Alt + S`):** Highlight any text, explanation, or code summary in your editor, right-click $\rightarrow$ **"J.A.R.V.I.S.: Speak Selection"** or press `Alt + S` to hear it read aloud immediately.
 - **Headless Auto-Daemon:** Silently launches the local Python FastAPI backend upon Antigravity IDE startup without keeping any Electron desktop app open.
 - **Pitch-Preserved Speedup:** Uses FFmpeg `atempo` time-stretching so accelerating speech doesn't distort pitch into a chipmunk voice.
 - **Buffer Tail Protection:** Pre-bakes a 1.5-second silence tail into playback audio to prevent Windows sound driver buffers from truncating the final words.
