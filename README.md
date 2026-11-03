@@ -60,6 +60,8 @@ User Voice Input (Handy / Parakeet TDT 0.6B)
 antigravity-jarvis-voice/
 ├── config/
 │   └── jarvis_settings.json               # Live configuration (speed, enabled, voice)
+├── docs/
+│   └── ARCHITECTURE.md                    # In-depth architectural blueprint & troubleshooting guide
 ├── extension/                             # VS Code / Antigravity IDE UI Extension
 │   ├── package.json
 │   └── extension.js
@@ -69,6 +71,12 @@ antigravity-jarvis-voice/
 └── scripts/
     └── jarvis_speech.py                   # Core TTS pipeline & audio playback bridge
 ```
+
+---
+
+## Detailed Documentation
+
+For a complete architectural breakdown, lifecycle hook mechanics, DSP speed-stretching details, and troubleshooting logs, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
