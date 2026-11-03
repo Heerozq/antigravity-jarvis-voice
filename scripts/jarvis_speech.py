@@ -5,18 +5,25 @@ import re
 import hashlib
 import urllib.request
 import urllib.error
+import urllib.parse
 import subprocess
 import tempfile
 import time
 import glob
+import sqlite3
+import ctypes
 
 SETTINGS_FILE = r"C:\Users\Admin\.gemini\config\jarvis_settings.json"
+CONVERSATION_DB_PATH = r"C:\Users\Admin\.gemini\antigravity\conversation_summaries.db"
+BRAIN_DIR = r"C:\Users\Admin\.gemini\antigravity\brain"
+
 TEMP_DIR = tempfile.gettempdir()
 LOG_FILE = os.path.join(TEMP_DIR, "antigravity_jarvis.log")
-RAW_AUDIO_PATH = os.path.join(TEMP_DIR, "antigravity_jarvis_raw.mp3")
-READY_AUDIO_PATH = os.path.join(TEMP_DIR, "antigravity_jarvis_ready.wav")
-CACHE_FILE = os.path.join(TEMP_DIR, "antigravity_jarvis_last_hash.txt")
+LOCK_FILE = os.path.join(TEMP_DIR, "antigravity_jarvis_playback.lock")
+GLOBAL_RAW_AUDIO_PATH = os.path.join(TEMP_DIR, "antigravity_jarvis_raw.mp3")
+GLOBAL_READY_AUDIO_PATH = os.path.join(TEMP_DIR, "antigravity_jarvis_ready.wav")
 TRANSCRIPT_TRACK_FILE = os.path.join(TEMP_DIR, "antigravity_jarvis_last_transcript.txt")
+WORKSPACE_MAP_FILE = os.path.join(TEMP_DIR, "antigravity_jarvis_workspace_map.json")
 
 PYTHON_BACKEND_PATH = r"D:\VoiceStudio\project\.venv\Scripts\python.exe"
 PROJECT_DIR = r"D:\VoiceStudio\project"
@@ -42,6 +49,194 @@ def log(msg):
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     except Exception:
         pass
+
+def is_pid_alive(pid):
+    """Check whether a process ID is currently running on Windows."""
+    if pid <= 0:
+        return False
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    except Exception:
+        return False
+
+def acquire_playback_lock(timeout=180):
+    """Sequential queue: acquire an exclusive inter-process lock for audio playback."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            except Exception:
+                pass
+            return fd
+        except FileExistsError:
+            # Check for stale lock
+            try:
+                if os.path.exists(LOCK_FILE):
+                    # If lock file exists, check if owning PID is alive
+                    try:
+                        with open(LOCK_FILE, "r") as f:
+                            raw_pid = f.read().strip()
+                        if raw_pid.isdigit() and not is_pid_alive(int(raw_pid)):
+                            os.remove(LOCK_FILE)
+                            continue
+                    except Exception:
+                        pass
+                    # If file is older than 2 minutes, clear it
+                    if time.time() - os.path.getmtime(LOCK_FILE) > 120:
+                        os.remove(LOCK_FILE)
+                        continue
+            except Exception:
+                pass
+            time.sleep(0.3)
+    return None
+
+def release_playback_lock(fd):
+    """Release playback lock and clean up lock file."""
+    try:
+        if fd is not None:
+            os.close(fd)
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+    except Exception:
+        pass
+
+def extract_conv_id(transcript_path):
+    if not transcript_path:
+        return "default"
+    norm = os.path.normpath(transcript_path)
+    parts = norm.split(os.sep)
+    if "brain" in parts:
+        idx = parts.index("brain")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return hashlib.md5(transcript_path.encode()).hexdigest()[:12]
+
+def get_workspace_name_for_conv(conv_id):
+    """Query Antigravity conversation database to get human-readable project title."""
+    if not os.path.exists(CONVERSATION_DB_PATH) or not conv_id:
+        return None
+    try:
+        conn = sqlite3.connect(CONVERSATION_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT workspace_uris, title FROM conversation_summaries WHERE conversation_id = ?", (conv_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            uris_raw, title = row
+            if uris_raw:
+                try:
+                    uris = json.loads(uris_raw)
+                    if uris and isinstance(uris, list):
+                        uri = uris[0]
+                        parsed = urllib.parse.urlparse(uri)
+                        unquoted = urllib.parse.unquote(parsed.path)
+                        if unquoted.startswith('/') and len(unquoted) > 2 and unquoted[2] == ':':
+                            unquoted = unquoted[1:]
+                        ws_name = os.path.basename(os.path.normpath(unquoted))
+                        if ws_name and ws_name.lower() not in ["scratch", "default", "none", "temp"]:
+                            clean_ws = ws_name.replace('-', ' ').replace('_', ' ').strip()
+                            return clean_ws
+                except Exception:
+                    pass
+            if title and title.strip():
+                # Clean up title for concise speech announcement
+                clean_title = re.sub(r'[^a-zA-Z0-9 _-]', '', title.strip())
+                clean_title = clean_title.replace('-', ' ').replace('_', ' ').strip()
+                if len(clean_title) > 32:
+                    words = clean_title[:32].rsplit(' ', 1)
+                    clean_title = words[0] if len(words) > 1 else clean_title[:32]
+                return clean_title
+    except Exception as e:
+        log(f"Error querying conversation DB for workspace name: {e}")
+    return None
+
+def get_conversation_for_workspace_path(ws_path):
+    """Resolve workspace directory path to its latest Antigravity conversation transcript."""
+    if not ws_path:
+        return None
+    norm_ws = os.path.normpath(ws_path).replace('\\', '/').lower()
+
+    if os.path.exists(CONVERSATION_DB_PATH):
+        try:
+            conn = sqlite3.connect(CONVERSATION_DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT conversation_id, workspace_uris, last_modified_time FROM conversation_summaries ORDER BY last_modified_time DESC")
+            rows = cur.fetchall()
+            conn.close()
+            for conv_id, uris_raw, _ in rows:
+                if not uris_raw:
+                    continue
+                try:
+                    uris = json.loads(uris_raw)
+                    for u in uris:
+                        parsed = urllib.parse.urlparse(u)
+                        path = urllib.parse.unquote(parsed.path)
+                        if path.startswith('/') and len(path) > 2 and path[2] == ':':
+                            path = path[1:]
+                        if os.path.normpath(path).replace('\\', '/').lower() == norm_ws:
+                            t_path = os.path.join(BRAIN_DIR, conv_id, ".system_generated", "logs", "transcript.jsonl")
+                            if os.path.exists(t_path):
+                                return t_path
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"Error resolving conversation for workspace path: {e}")
+
+    # Fallback: check workspace map file
+    if os.path.exists(WORKSPACE_MAP_FILE):
+        try:
+            with open(WORKSPACE_MAP_FILE, "r", encoding="utf-8") as f:
+                w_map = json.load(f)
+            if norm_ws in w_map and os.path.exists(w_map[norm_ws]):
+                return w_map[norm_ws]
+        except Exception:
+            pass
+    return None
+
+def record_workspace_mapping(conv_id, transcript_path):
+    """Update workspace to transcript cache file."""
+    if not conv_id or not transcript_path:
+        return
+    try:
+        w_map = {}
+        if os.path.exists(WORKSPACE_MAP_FILE):
+            try:
+                with open(WORKSPACE_MAP_FILE, "r", encoding="utf-8") as f:
+                    w_map = json.load(f)
+            except Exception:
+                pass
+        w_map[conv_id] = transcript_path
+
+        if os.path.exists(CONVERSATION_DB_PATH):
+            conn = sqlite3.connect(CONVERSATION_DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT workspace_uris FROM conversation_summaries WHERE conversation_id = ?", (conv_id,))
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                try:
+                    uris = json.loads(row[0])
+                    for u in uris:
+                        parsed = urllib.parse.urlparse(u)
+                        path = urllib.parse.unquote(parsed.path)
+                        if path.startswith('/') and len(path) > 2 and path[2] == ':':
+                            path = path[1:]
+                        norm_p = os.path.normpath(path).replace('\\', '/').lower()
+                        w_map[norm_p] = transcript_path
+                except Exception:
+                    pass
+
+        with open(WORKSPACE_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(w_map, f, indent=2)
+    except Exception as e:
+        log(f"Error updating workspace mapping: {e}")
 
 def ensure_backend_running():
     """Verify VoiceStudio backend is alive and has the Atul Kapoor voice profile loaded."""
@@ -145,8 +340,13 @@ def split_text_into_chunks(text, max_chunk=3800):
         chunks.append(current)
     return chunks
 
-def find_latest_transcript():
-    """Find the most recently modified transcript file."""
+def find_latest_transcript(workspace_path=None):
+    """Find the transcript for the specified workspace or the most recently modified."""
+    if workspace_path:
+        t_path = get_conversation_for_workspace_path(workspace_path)
+        if t_path and os.path.exists(t_path):
+            return t_path
+
     if os.path.exists(TRANSCRIPT_TRACK_FILE):
         try:
             with open(TRANSCRIPT_TRACK_FILE, "r", encoding="utf-8") as f:
@@ -156,7 +356,7 @@ def find_latest_transcript():
         except Exception:
             pass
 
-    pattern = r"C:\Users\Admin\.gemini\antigravity\brain\*\.system_generated\logs\transcript.jsonl"
+    pattern = os.path.join(BRAIN_DIR, "*", ".system_generated", "logs", "transcript.jsonl")
     matches = glob.glob(pattern)
     if matches:
         matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
@@ -221,44 +421,65 @@ def extract_latest_response(transcript_path):
         log(f"Error reading transcript: {e}")
     return ""
 
-def play_audio(speed):
-    """Bake speed adjustment and silence tail, then play with ffplay."""
+def play_audio_queued(raw_audio_path, ready_audio_path, speed, is_interactive=False):
+    """Sequential queue playback: wait for existing playback to finish before speaking."""
     if not os.path.exists(FFPLAY_PATH):
         log("ffplay not found")
         return False
 
-    # Stop any currently active playback
+    # Manual user action (Replay, Stop, Speak Selection) interrupts current audio immediately
+    if is_interactive:
+        log("Interactive action requested: interrupting ongoing speech")
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "ffplay.exe"], capture_output=True)
+        except Exception:
+            pass
+        if os.path.exists(LOCK_FILE):
+            try:
+                os.remove(LOCK_FILE)
+            except Exception:
+                pass
+
+    lock_fd = acquire_playback_lock(timeout=180)
+    if lock_fd is None:
+        log("Could not acquire sequential playback lock within timeout.")
+        return False
+
     try:
-        subprocess.run(["taskkill", "/F", "/IM", "ffplay.exe"], capture_output=True)
-    except Exception:
-        pass
+        settings = load_settings()
+        if not settings.get("enabled", True):
+            log("Speech is muted globally in settings.")
+            return False
+        active_speed = float(settings.get("speed", speed))
 
-    if os.path.exists(RAW_AUDIO_PATH) and os.path.exists(FFMPEG_PATH):
-        af_filter = f"atempo={speed},apad=pad_dur=1.5"
-        log(f"Baking audio via ffmpeg: {af_filter}")
-        subprocess.run([
-            FFMPEG_PATH, "-y", "-i", RAW_AUDIO_PATH,
-            "-af", af_filter,
-            READY_AUDIO_PATH
-        ], capture_output=True, check=False)
+        if os.path.exists(raw_audio_path) and os.path.exists(FFMPEG_PATH):
+            af_filter = f"atempo={active_speed},apad=pad_dur=1.5"
+            log(f"Baking audio via ffmpeg ({active_speed}x): {af_filter}")
+            subprocess.run([
+                FFMPEG_PATH, "-y", "-i", raw_audio_path,
+                "-af", af_filter,
+                ready_audio_path
+            ], capture_output=True, check=False)
 
-        log(f"Playing baked audio with ffplay at {speed}x")
-        subprocess.run([
-            FFPLAY_PATH, "-nodisp", "-autoexit", "-loglevel", "quiet",
-            READY_AUDIO_PATH
-        ], check=False)
-        log("Playback finished successfully")
-        return True
-    elif os.path.exists(READY_AUDIO_PATH):
-        subprocess.run([
-            FFPLAY_PATH, "-nodisp", "-autoexit", "-loglevel", "quiet",
-            READY_AUDIO_PATH
-        ], check=False)
-        return True
+            log(f"Playing queued audio with ffplay: {ready_audio_path}")
+            subprocess.run([
+                FFPLAY_PATH, "-nodisp", "-autoexit", "-loglevel", "quiet",
+                ready_audio_path
+            ], check=False)
+            log("Sequential playback completed successfully")
+            return True
+        elif os.path.exists(ready_audio_path):
+            subprocess.run([
+                FFPLAY_PATH, "-nodisp", "-autoexit", "-loglevel", "quiet",
+                ready_audio_path
+            ], check=False)
+            return True
+    finally:
+        release_playback_lock(lock_fd)
     return False
 
-def synthesize_speech(cleaned_speech, voice, speed):
-    """Call VoiceStudio backend to generate raw audio with Atul Kapoor voice profile."""
+def synthesize_speech(cleaned_speech, voice, raw_audio_path):
+    """Synthesize text via VoiceStudio and write to destination raw audio file."""
     ensure_backend_running()
 
     log(f"Synthesizing {len(cleaned_speech)} chars with voice '{voice}'...")
@@ -294,63 +515,80 @@ def synthesize_speech(cleaned_speech, voice, speed):
             return False
 
     if combined_audio:
-        with open(RAW_AUDIO_PATH, "wb") as f:
+        with open(raw_audio_path, "wb") as f:
             f.write(combined_audio)
+        # Mirror to global raw path for backward compatibility
+        try:
+            with open(GLOBAL_RAW_AUDIO_PATH, "wb") as f:
+                f.write(combined_audio)
+        except Exception:
+            pass
         return True
     return False
 
-def replay_last():
+def replay_last(workspace_path=None):
     log("Replay requested")
     settings = load_settings()
     speed = float(settings.get("speed", 1.2))
     voice = settings.get("voice", "Atul Kapoor")
-    log(f"Replay parameters: speed={speed}x, voice={voice}")
 
-    transcript_path = find_latest_transcript()
+    transcript_path = find_latest_transcript(workspace_path)
+    conv_id = extract_conv_id(transcript_path)
+
+    raw_path = os.path.join(TEMP_DIR, f"antigravity_jarvis_raw_{conv_id}.mp3")
+    ready_path = os.path.join(TEMP_DIR, f"antigravity_jarvis_ready_{conv_id}.wav")
+    cache_path = os.path.join(TEMP_DIR, f"antigravity_jarvis_hash_{conv_id}.txt")
+
     latest_response = extract_latest_response(transcript_path)
     cleaned_speech = clean_text_for_speech(latest_response)
 
     if cleaned_speech and len(cleaned_speech) >= 3:
-        raw_hash = hashlib.sha256((cleaned_speech + "_" + voice).encode("utf-8")).hexdigest()
-        
+        # Prepend project name if found
+        ws_name = get_workspace_name_for_conv(conv_id)
+        if ws_name and not cleaned_speech.lower().startswith(f"in {ws_name.lower()}"):
+            speech_with_prefix = f"In {ws_name}: {cleaned_speech}"
+        else:
+            speech_with_prefix = cleaned_speech
+
+        raw_hash = hashlib.sha256((speech_with_prefix + "_" + voice).encode("utf-8")).hexdigest()
+
         last_recorded_hash = ""
-        if os.path.exists(CACHE_FILE):
+        if os.path.exists(cache_path):
             try:
-                with open(CACHE_FILE, "r") as f:
+                with open(cache_path, "r") as f:
                     last_recorded_hash = f.read().strip().split("_")[0]
             except Exception:
                 pass
 
-        if os.path.exists(RAW_AUDIO_PATH) and last_recorded_hash == raw_hash:
-            log("Replay: RAW_AUDIO_PATH matches latest response. Re-baking at current speed.")
-            play_audio(speed)
+        if os.path.exists(raw_path) and last_recorded_hash == raw_hash:
+            log("Replay: RAW audio matches latest response. Re-baking at current speed.")
+            play_audio_queued(raw_path, ready_path, speed, is_interactive=True)
             return
 
-        log("Replay: RAW_AUDIO_PATH is stale or missing. Re-synthesizing with Atul Kapoor voice...")
-        if synthesize_speech(cleaned_speech, voice, speed):
+        log("Replay: Synthesizing latest response with Atul Kapoor voice...")
+        if synthesize_speech(speech_with_prefix, voice, raw_path):
             try:
-                with open(CACHE_FILE, "w") as f:
+                with open(cache_path, "w") as f:
                     f.write(f"{raw_hash}_{speed}_{voice}")
             except Exception:
                 pass
-            play_audio(speed)
+            play_audio_queued(raw_path, ready_path, speed, is_interactive=True)
             return
 
-    # Fallback to playing existing audio buffer
-    if os.path.exists(RAW_AUDIO_PATH) or os.path.exists(READY_AUDIO_PATH):
-        log("Replay fallback: playing existing audio buffer")
-        play_audio(speed)
-    else:
-        log("Replay: No audio available to play")
+    # Fallback to playing existing buffer
+    if os.path.exists(raw_path) or os.path.exists(ready_path):
+        play_audio_queued(raw_path, ready_path, speed, is_interactive=True)
+    elif os.path.exists(GLOBAL_RAW_AUDIO_PATH):
+        play_audio_queued(GLOBAL_RAW_AUDIO_PATH, GLOBAL_READY_AUDIO_PATH, speed, is_interactive=True)
 
-def read_specific_turn(turn_id):
+def read_specific_turn(turn_id, workspace_path=None):
     """Synthesize and read aloud a specific turn by its ID from the transcript."""
     settings = load_settings()
     speed = float(settings.get("speed", 1.2))
     voice = settings.get("voice", "Atul Kapoor")
-    log(f"Read turn requested: turn_id={turn_id}")
 
-    transcript_path = find_latest_transcript()
+    transcript_path = find_latest_transcript(workspace_path)
+    conv_id = extract_conv_id(transcript_path)
     turns = get_conversation_turns(transcript_path)
     target = next((t for t in turns if t["id"] == turn_id), None)
     if not target:
@@ -362,14 +600,17 @@ def read_specific_turn(turn_id):
         log("Cleaned turn text too short or empty")
         return False
 
+    turn_raw = os.path.join(TEMP_DIR, f"antigravity_jarvis_turn_{conv_id}_{turn_id}.mp3")
+    turn_ready = os.path.join(TEMP_DIR, f"antigravity_jarvis_turn_{conv_id}_{turn_id}.wav")
+
     log(f"Speaking turn #{turn_id} ({target['role']}): {cleaned_speech[:60]}...")
-    if synthesize_speech(cleaned_speech, voice, speed):
-        play_audio(speed)
+    if synthesize_speech(cleaned_speech, voice, turn_raw):
+        play_audio_queued(turn_raw, turn_ready, speed, is_interactive=True)
         return True
     return False
 
 def speak_file_content(file_path):
-    """Read arbitrary text from a file, clean it, synthesize, and speak."""
+    """Read arbitrary highlighted text from a file, clean it, synthesize, and speak."""
     if not os.path.exists(file_path):
         log(f"Speak file not found: {file_path}")
         return False
@@ -390,16 +631,29 @@ def speak_file_content(file_path):
         log("Selected text is empty after cleaning")
         return False
 
-    log(f"Speaking selected file text ({len(cleaned_speech)} chars)...")
-    if synthesize_speech(cleaned_speech, voice, speed):
-        play_audio(speed)
+    sel_raw = os.path.join(TEMP_DIR, "antigravity_jarvis_selection.mp3")
+    sel_ready = os.path.join(TEMP_DIR, "antigravity_jarvis_selection.wav")
+
+    log(f"Speaking selected text ({len(cleaned_speech)} chars)...")
+    if synthesize_speech(cleaned_speech, voice, sel_raw):
+        play_audio_queued(sel_raw, sel_ready, speed, is_interactive=True)
         return True
     return False
 
+def get_workspace_arg():
+    if "--workspace" in sys.argv:
+        try:
+            return sys.argv[sys.argv.index("--workspace") + 1]
+        except Exception:
+            pass
+    return None
+
 def main():
+    ws_arg = get_workspace_arg()
+
     # 1. Output conversation history as JSON
     if "--get-history" in sys.argv:
-        transcript_path = find_latest_transcript()
+        transcript_path = find_latest_transcript(ws_arg)
         turns = get_conversation_turns(transcript_path)
         data = [{"id": t["id"], "role": t["role"], "summary": t["summary"]} for t in turns]
         sys.stdout.buffer.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
@@ -409,7 +663,7 @@ def main():
     if "--read-turn" in sys.argv:
         try:
             turn_idx = int(sys.argv[sys.argv.index("--read-turn") + 1])
-            read_specific_turn(turn_idx)
+            read_specific_turn(turn_idx, ws_arg)
         except Exception as e:
             log(f"Invalid --read-turn argument: {e}")
         print("{}")
@@ -427,11 +681,11 @@ def main():
 
     # 4. Replay last response
     if "--replay" in sys.argv:
-        replay_last()
+        replay_last(ws_arg)
         print("{}")
         return
 
-    # 5. Normal Antigravity hook invocation
+    # 5. Normal Antigravity hook invocation (automatic turn completion)
     settings = load_settings()
     if not settings.get("enabled", True):
         log("J.A.R.V.I.S. speech is muted in settings")
@@ -463,6 +717,13 @@ def main():
         print("{}")
         return
 
+    conv_id = extract_conv_id(transcript_path)
+    record_workspace_mapping(conv_id, transcript_path)
+
+    raw_path = os.path.join(TEMP_DIR, f"antigravity_jarvis_raw_{conv_id}.mp3")
+    ready_path = os.path.join(TEMP_DIR, f"antigravity_jarvis_ready_{conv_id}.wav")
+    cache_path = os.path.join(TEMP_DIR, f"antigravity_jarvis_hash_{conv_id}.txt")
+
     response_text = extract_latest_response(transcript_path)
     cleaned_speech = clean_text_for_speech(response_text)
     if not cleaned_speech or len(cleaned_speech) < 3:
@@ -470,30 +731,38 @@ def main():
         print("{}")
         return
 
+    # Prepend project name announcement (e.g. "In MyApp: ...")
+    ws_name = get_workspace_name_for_conv(conv_id)
+    if ws_name and not cleaned_speech.lower().startswith(f"in {ws_name.lower()}"):
+        speech_text = f"In {ws_name}: {cleaned_speech}"
+    else:
+        speech_text = cleaned_speech
+
     # Deduplication check
-    raw_hash = hashlib.sha256((cleaned_speech + "_" + voice).encode("utf-8")).hexdigest()
+    raw_hash = hashlib.sha256((speech_text + "_" + voice).encode("utf-8")).hexdigest()
     full_hash = f"{raw_hash}_{speed}_{voice}"
 
-    if os.path.exists(CACHE_FILE):
+    if os.path.exists(cache_path):
         try:
-            with open(CACHE_FILE, "r") as f:
+            with open(cache_path, "r") as f:
                 if f.read().strip() == full_hash:
-                    log("Message already spoken (deduplication hit)")
+                    log(f"Message already spoken for conv {conv_id} (deduplication hit)")
                     print("{}")
                     return
         except Exception:
             pass
 
-    log(f"Hook invoked (speed={speed}, voice={voice})")
+    log(f"Hook invoked for conv {conv_id} (project: '{ws_name}', speed={speed})")
 
     # Synthesize speech
-    if synthesize_speech(cleaned_speech, voice, speed):
+    if synthesize_speech(speech_text, voice, raw_path):
         try:
-            with open(CACHE_FILE, "w") as f:
+            with open(cache_path, "w") as f:
                 f.write(full_hash)
         except Exception:
             pass
-        play_audio(speed)
+        # Sequential queued playback
+        play_audio_queued(raw_path, ready_path, speed, is_interactive=False)
 
     print("{}")
 

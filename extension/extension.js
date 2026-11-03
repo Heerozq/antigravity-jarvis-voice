@@ -11,6 +11,7 @@ const PYTHON_PATH = 'D:\\VoiceStudio\\project\\.venv\\Scripts\\python.exe';
 const PROJECT_DIR = 'D:\\VoiceStudio\\project';
 const VOICESTUDIO_DATA_DIR = 'D:\\VoiceStudio\\data';
 const VOICESTUDIO_MODELS_DIR = 'D:\\VoiceStudio\\models';
+const LOCK_FILE = path.join(os.tmpdir(), 'antigravity_jarvis_playback.lock');
 
 function readSettings() {
     const defaults = { enabled: true, speed: 1.2, voice: 'Atul Kapoor' };
@@ -99,6 +100,13 @@ function ensureHeadlessBackend(statusBarItem) {
     });
 }
 
+function getCurrentWorkspacePath() {
+    if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+        return vscode.workspace.workspaceFolders[0].uri.fsPath;
+    }
+    return '';
+}
+
 function activate(context) {
     let settings = readSettings();
 
@@ -126,22 +134,22 @@ function activate(context) {
     const historyItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     historyItem.command = 'jarvis.showHistory';
     historyItem.text = '$(list-unordered) History';
-    historyItem.tooltip = 'Browse and speak past conversation turns (Alt+H)';
+    historyItem.tooltip = 'Browse and speak past conversation turns for this window (Alt+H)';
 
     function updateUI() {
         settings = readSettings();
         if (settings.enabled) {
             muteItem.text = '$(unmute) JARVIS: ON';
-            muteItem.tooltip = 'J.A.R.V.I.S. voice is active. Click to MUTE.';
+            muteItem.tooltip = 'J.A.R.V.I.S. voice is active globally. Click to MUTE.';
             muteItem.backgroundColor = undefined;
         } else {
             muteItem.text = '$(mute) JARVIS: OFF';
-            muteItem.tooltip = 'J.A.R.V.I.S. voice is muted. Click to UNMUTE.';
+            muteItem.tooltip = 'J.A.R.V.I.S. voice is MUTED globally. Click to UNMUTE.';
             muteItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         }
         const speedVal = Number(settings.speed);
         speedItem.text = `$(dashboard) ${speedVal.toFixed(speedVal % 1 === 0 ? 1 : 2)}x`;
-        speedItem.tooltip = `Current speed is ${speedVal}x. Click to change.`;
+        speedItem.tooltip = `Current global speed is ${speedVal}x. Click to change.`;
     }
 
     updateUI();
@@ -153,13 +161,14 @@ function activate(context) {
 
     ensureHeadlessBackend(muteItem);
 
+    // Synchronize settings live across all open windows
     if (fs.existsSync(SETTINGS_FILE)) {
         fs.watch(SETTINGS_FILE, () => {
             updateUI();
         });
     }
 
-    // Command: Toggle Mute
+    // Command: Toggle Mute (Global)
     const toggleMuteCmd = vscode.commands.registerCommand('jarvis.toggleMute', () => {
         settings = readSettings();
         settings.enabled = !settings.enabled;
@@ -168,22 +177,24 @@ function activate(context) {
 
         if (!settings.enabled) {
             exec('taskkill /F /IM ffplay.exe', () => {});
-            vscode.window.showInformationMessage('J.A.R.V.I.S. voice is now MUTED');
+            try { if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch (e) {}
+            vscode.window.showInformationMessage('J.A.R.V.I.S. voice is now MUTED across all windows');
         } else {
             vscode.window.showInformationMessage('J.A.R.V.I.S. voice is now ON');
         }
     });
 
-    // Command: Stop Audio
+    // Command: Stop Audio (Global)
     const stopAudioCmd = vscode.commands.registerCommand('jarvis.stopAudio', () => {
         exec('taskkill /F /IM ffplay.exe', (err) => {
+            try { if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch (e) {}
             if (!err) {
                 vscode.window.setStatusBarMessage('$(check) J.A.R.V.I.S. stopped', 2500);
             }
         });
     });
 
-    // Command: Change Speed
+    // Command: Change Speed (Global)
     const changeSpeedCmd = vscode.commands.registerCommand('jarvis.changeSpeed', async () => {
         const options = [
             { label: '1.0x', description: 'Original natural speed', value: 1.0 },
@@ -195,7 +206,7 @@ function activate(context) {
         ];
 
         const selected = await vscode.window.showQuickPick(options, {
-            placeHolder: `Select J.A.R.V.I.S. voice playback speed (current: ${settings.speed}x)`
+            placeHolder: `Select J.A.R.V.I.S. voice playback speed across all windows (current: ${settings.speed}x)`
         });
 
         if (selected) {
@@ -203,26 +214,30 @@ function activate(context) {
             settings.speed = selected.value;
             writeSettings(settings);
             updateUI();
-            vscode.window.showInformationMessage(`J.A.R.V.I.S. speed set to ${selected.value}x`);
+            vscode.window.showInformationMessage(`J.A.R.V.I.S. speed set to ${selected.value}x across all windows`);
         }
     });
 
-    // Command: Replay Last
+    // Command: Replay Last (Scoped to current workspace)
     const replayCmd = vscode.commands.registerCommand('jarvis.replayAudio', () => {
+        const ws = getCurrentWorkspacePath();
+        const wsArg = ws ? ` --workspace "${ws}"` : '';
         vscode.window.setStatusBarMessage('$(history) Replaying last message...', 3000);
-        exec(`python "${SCRIPT_PATH}" --replay`, (err) => {
+        exec(`python "${SCRIPT_PATH}" --replay${wsArg}`, (err) => {
             if (err) {
                 vscode.window.showErrorMessage('Error replaying audio: ' + err.message);
             }
         });
     });
 
-    // Command: Browse Conversation History (Option A)
+    // Command: Browse Conversation History (Scoped to current workspace)
     const showHistoryCmd = vscode.commands.registerCommand('jarvis.showHistory', () => {
+        const ws = getCurrentWorkspacePath();
+        const wsArg = ws ? ` --workspace "${ws}"` : '';
         vscode.window.setStatusBarMessage('$(sync~spin) Loading conversation turns...', 2000);
-        exec(`python "${SCRIPT_PATH}" --get-history`, { maxBuffer: 10 * 1024 * 1024 }, async (err, stdout) => {
+        exec(`python "${SCRIPT_PATH}" --get-history${wsArg}`, { maxBuffer: 10 * 1024 * 1024 }, async (err, stdout) => {
             if (err || !stdout) {
-                vscode.window.showErrorMessage('Could not retrieve conversation history.');
+                vscode.window.showErrorMessage('Could not retrieve conversation history for this workspace.');
                 return;
             }
             try {
@@ -231,7 +246,6 @@ function activate(context) {
                     vscode.window.showInformationMessage('No conversation messages found in current transcript.');
                     return;
                 }
-                // Reverse so newest turns are at top, but turn IDs remain stable
                 const reversed = turns.slice().reverse();
                 const quickPickItems = reversed.map(t => ({
                     label: `${t.role === 'You' ? '$(person)' : '$(robot)'} #${t.id} ${t.role}`,
@@ -245,7 +259,7 @@ function activate(context) {
 
                 if (picked) {
                     vscode.window.setStatusBarMessage(`$(unmute) J.A.R.V.I.S.: Speaking turn #${picked.turnId}...`, 4000);
-                    exec(`python "${SCRIPT_PATH}" --read-turn ${picked.turnId}`, (playErr) => {
+                    exec(`python "${SCRIPT_PATH}" --read-turn ${picked.turnId}${wsArg}`, (playErr) => {
                         if (playErr) {
                             vscode.window.showErrorMessage('Playback error: ' + playErr.message);
                         }
@@ -312,6 +326,7 @@ function activate(context) {
 
 function deactivate() {
     exec('taskkill /F /IM ffplay.exe', () => {});
+    try { if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch (e) {}
 }
 
 module.exports = {

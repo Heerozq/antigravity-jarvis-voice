@@ -13,11 +13,16 @@ Replaces cloud subscription services (**Wispr Flow** and **ElevenLabs**) with lo
 - **Atul Kapoor Voice Timbre:** Authentic deep baritone voice speaking fluent English.
 - **Smart Markdown Cleaner:** Automatically filters out raw code snippets, tables, backticks, and markdown hashes so speech remains conversational.
 - **Antigravity Status Bar & Shortcut Controls:**
-  - `$(unmute) JARVIS: ON / OFF` (Mute toggle)
-  - `$(debug-stop) Stop` (Instant stop switch)
-  - `$(dashboard) 1.2x` (Interactive speed dropdown from 1.0x to 2.0x)
-  - `$(history) Replay` (Re-reads last response with current speed)
-  - `$(list-unordered) History` (Browse & speak any past conversation turn, shortcut: `Alt + H`)
+  - `$(unmute) JARVIS: ON / OFF` (Global Mute toggle across all windows)
+  - `$(debug-stop) Stop` (Instant stop switch, terminates active speech immediately)
+  - `$(dashboard) 1.2x` (Interactive speed dropdown from 1.0x to 2.0x, synced globally)
+  - `$(history) Replay` (Re-reads last response for the active window's workspace)
+  - `$(list-unordered) History` (Browse & speak past conversation turns for current window, shortcut: `Alt + H`)
+- **Multi-Window & Multi-Project Coordination:**
+  - **Sequential Playback Queue:** When multiple projects finish turns concurrently, announcements queue cleanly via an inter-process lock with PID verification—never overlapping or truncating.
+  - **Project Context Announcements:** Announces which project is speaking before reading the turn (e.g., *"In Handy App Installation Guide: All unit tests passed"*).
+  - **Window-Scoped Workspace Isolation:** Replay and History automatically identify each window's active workspace folder, keeping transcripts strictly separated.
+  - **Live Global Settings Sync:** Status bar speed and mute changes in one window instantly update all other open windows.
 - **Speak Highlighted Selection (`Alt + S`):** Highlight any text, explanation, or code summary in your editor, right-click $\rightarrow$ **"J.A.R.V.I.S.: Speak Selection"** or press `Alt + S` to hear it read aloud immediately.
 - **Headless Auto-Daemon:** Silently launches the local Python FastAPI backend upon Antigravity IDE startup without keeping any Electron desktop app open.
 - **Pitch-Preserved Speedup:** Uses FFmpeg `atempo` time-stretching so accelerating speech doesn't distort pitch into a chipmunk voice.
